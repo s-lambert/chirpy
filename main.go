@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 )
 
@@ -21,6 +22,10 @@ func main() {
 	mux := http.NewServeMux()
 	corsMux := middlewareCors(mux)
 
-	mux.Handle("/", http.FileServer(http.Dir("./public")))
+	mux.Handle("/app/", http.StripPrefix("/app/", http.FileServer(http.Dir("public"))))
+	mux.Handle("/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprintf(w, `OK`)
+	}))
 	http.ListenAndServe(":8080", corsMux)
 }
