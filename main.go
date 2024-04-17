@@ -21,5 +21,6 @@ func main() {
 	mux := http.NewServeMux()
 	corsMux := middlewareCors(mux)
 
+	mux.Handle("/", http.FileServer(http.Dir("./public")))
 	http.ListenAndServe(":8080", corsMux)
 }
