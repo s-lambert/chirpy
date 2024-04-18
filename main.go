@@ -46,15 +46,23 @@ func main() {
 	}
 
 	mux.Handle("/app/", middlewareNoCache(cfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir("public"))))))
-	mux.Handle("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintf(w, `OK`)
 	}))
-	mux.Handle("GET /metrics", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(w, "Hits: %d", cfg.fileserverHits)
+	mux.Handle("GET /admin/metrics", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<html>
+
+<body>
+    <h1>Welcome, Chirpy Admin</h1>
+    <p>Chirpy has been visited %d times!</p>
+</body>
+
+</html>
+`, cfg.fileserverHits)
 	}))
-	mux.Handle("/reset", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/reset", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg.fileserverHits = 0
 	}))
 	http.ListenAndServe(":8080", corsMux)
