@@ -1,17 +1,20 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
-	"strings"
+	"os"
+
+	"github.com/joho/godotenv"
 )
 
-type apiConfig struct {
+type ApiConfig struct {
 	fileserverHits int
+	JwtSecret      string
 }
 
-func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
+func (cfg *ApiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg.fileserverHits += 1
 
@@ -43,8 +46,20 @@ func main() {
 	mux := http.NewServeMux()
 	corsMux := middlewareCors(mux)
 
-	cfg := apiConfig{
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	jwtSecret := os.Getenv("JWT_SECRET")
+	cfg := ApiConfig{
 		fileserverHits: 0,
+		JwtSecret:      jwtSecret,
+	}
+
+	db, err := NewDB("database.json")
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	mux.Handle("/app/", middlewareNoCache(cfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir("public"))))))
@@ -67,59 +82,14 @@ func main() {
 	mux.Handle("/api/reset", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg.fileserverHits = 0
 	}))
-	mux.Handle("POST /api/validate_chirp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		type chirp struct {
-			Body string `json:"body"`
-		}
-		type chirpSuccess struct {
-			CleanedBody string `json:"cleaned_body"`
-		}
-
-		decoder := json.NewDecoder(r.Body)
-		newChirp := chirp{}
-		err := decoder.Decode(&newChirp)
-
-		w.Header().Set("Content-Type", "application/json")
-
-		if err != nil {
-			RespondWithError(w, 500, fmt.Sprintf("Error marshalling JSON: %s", err))
-			return
-		}
-
-		if len([]rune(newChirp.Body)) > 140 {
-			RespondWithError(w, 400, "Chirp is too long")
-			return
-		}
-
-		swearWords := []string{
-			"kerfuffle",
-			"sharbert",
-			"fornax",
-		}
-
-		words := strings.Split(newChirp.Body, " ")
-		bleepedWords := make([]string, 0)
-
-		for _, word := range words {
-			shouldBleep := false
-			lowerWord := strings.ToLower(word)
-			for _, swearWord := range swearWords {
-				if lowerWord == swearWord {
-					shouldBleep = true
-					break
-				}
-			}
-			if shouldBleep {
-				bleepedWords = append(bleepedWords, "****")
-			} else {
-				bleepedWords = append(bleepedWords, word)
-			}
-		}
-
-		isValidChirp := chirpSuccess{
-			CleanedBody: strings.Join(bleepedWords, " "),
-		}
-		RespondWithJSON(w, 200, isValidChirp)
-	}))
+	mux.Handle("GET /api/chirps", GetChirpsHandler(db))
+	mux.Handle("POST /api/chirps", CreateChirpHandler(db))
+	mux.Handle("DELETE /api/chirps/{chirpID}", DeleteChirpHandler(db))
+	mux.Handle("GET /api/chirps/{chirpID}", GetChirpHandler(db))
+	mux.Handle("GET /api/users", GetUsersHandler(db))
+	mux.Handle("POST /api/users", CreateUserHandler(db))
+	mux.Handle("PUT /api/users", UpdateUserHandler(db, &cfg))
+	mux.Handle("GET /api/users/{userID}", GetUserHandler(db))
+	mux.Handle("POST /api/login", LoginUserHandler(db, &cfg))
 	http.ListenAndServe(":8080", corsMux)
 }
