@@ -12,6 +12,7 @@ import (
 type ApiConfig struct {
 	fileserverHits int
 	JwtSecret      string
+	PolkaKey       string
 }
 
 func (cfg *ApiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -52,9 +53,11 @@ func main() {
 	}
 
 	jwtSecret := os.Getenv("JWT_SECRET")
+	polkaKey := os.Getenv("POLKA_KEY")
 	cfg := ApiConfig{
 		fileserverHits: 0,
 		JwtSecret:      jwtSecret,
+		PolkaKey:       polkaKey,
 	}
 
 	db, err := NewDB("database.json")
@@ -91,5 +94,8 @@ func main() {
 	mux.Handle("PUT /api/users", UpdateUserHandler(db, &cfg))
 	mux.Handle("GET /api/users/{userID}", GetUserHandler(db))
 	mux.Handle("POST /api/login", LoginUserHandler(db, &cfg))
+	mux.Handle("POST /api/refresh", RefreshTokenHandler(db, &cfg))
+	mux.Handle("POST /api/revoke", RevokeTokenHandler(db, &cfg))
+	mux.Handle("POST /api/polka/webhooks", PolkaWebhookHandler(db, &cfg))
 	http.ListenAndServe(":8080", corsMux)
 }

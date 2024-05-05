@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"sort"
 	"sync"
+	"time"
 )
 
 type DB struct {
@@ -21,14 +23,21 @@ type Chirp struct {
 }
 
 type User struct {
-	Email    string `json:"email"`
-	Password string `json:"password,omitempty"`
-	Id       int    `json:"id"`
+	Email       string `json:"email"`
+	Password    string `json:"password,omitempty"`
+	Id          int    `json:"id"`
+	IsChirpyRed bool   `json:"is_chirpy_red"`
+}
+
+type TokenInfo struct {
+	ExpiresAt time.Time `json:"expires_at"`
+	UserId    int       `json:"user_id"`
 }
 
 type DBStructure struct {
-	Chirps map[int]Chirp `json:"chirps"`
-	Users  map[int]User  `json:"users"`
+	Chirps        map[int]Chirp        `json:"chirps"`
+	Users         map[int]User         `json:"users"`
+	RefreshTokens map[string]TokenInfo `json:"refresh_tokens"`
 }
 
 func NewDB(path string) (*DB, error) {
@@ -142,9 +151,10 @@ func (db *DB) CreateUser(email, password string) (User, error) {
 
 	maxId += 1
 	newUser := User{
-		Id:       maxId,
-		Email:    email,
-		Password: password,
+		Id:          maxId,
+		Email:       email,
+		Password:    password,
+		IsChirpyRed: false,
 	}
 
 	dbStruct.Users[newUser.Id] = newUser
@@ -167,7 +177,7 @@ func (db *DB) UpdateUser(id int, newEmail, newPassword string) (User, error) {
 
 	existingUser, ok := dbStruct.Users[id]
 	if !ok {
-		return User{}, errors.New("Could not find existing user")
+		return User{}, errors.New("could not find existing user")
 	}
 
 	if newPassword != "" {
@@ -231,7 +241,7 @@ func (db *DB) GetUserByEmail(email string) (User, error) {
 			return user, nil
 		}
 	}
-	return User{}, errors.New("User not found")
+	return User{}, errors.New("user not found")
 }
 
 func (db *DB) ensureDB() error {
@@ -270,6 +280,9 @@ func (db *DB) loadDB() (DBStructure, error) {
 	if dbStruct.Users == nil {
 		dbStruct.Users = make(map[int]User)
 	}
+	if dbStruct.RefreshTokens == nil {
+		dbStruct.RefreshTokens = make(map[string]TokenInfo)
+	}
 
 	return dbStruct, nil
 }
@@ -281,4 +294,69 @@ func (db *DB) writeDB(dbStruct DBStructure) error {
 	}
 	writeErr := os.WriteFile(db.path, jsonBytes, 0666)
 	return writeErr
+}
+
+func (db *DB) SaveRefreshToken(userId int, rToken string, exp time.Time) error {
+	db.mux.Lock()
+	defer db.mux.Unlock()
+
+	dbStruct, err := db.loadDB()
+	if err != nil {
+		return err
+	}
+
+	dbStruct.RefreshTokens[rToken] = TokenInfo{
+		UserId:    userId,
+		ExpiresAt: exp,
+	}
+
+	return db.writeDB(dbStruct)
+}
+
+func (db *DB) RevokeRefreshToken(rToken string) error {
+	db.mux.Lock()
+	defer db.mux.Unlock()
+
+	dbStruct, err := db.loadDB()
+	if err != nil {
+		return err
+	}
+	delete(dbStruct.RefreshTokens, rToken)
+	return db.writeDB(dbStruct)
+}
+
+func (db *DB) RefreshTokenUser(rToken string) (int, error) {
+	db.mux.RLock()
+	defer db.mux.RUnlock()
+
+	dbStruct, err := db.loadDB()
+	if err != nil {
+		return 0, err
+	}
+
+	tokenInfo, ok := dbStruct.RefreshTokens[rToken]
+	if !ok {
+		return 0, errors.New("refresh token does not exist")
+	}
+	if time.Now().After(tokenInfo.ExpiresAt) {
+		return 0, errors.New("refresh token expired")
+	}
+	return tokenInfo.UserId, nil
+}
+
+func (db *DB) SetChirpyRed(userId int) error {
+	db.mux.Lock()
+	defer db.mux.Unlock()
+
+	dbStruct, err := db.loadDB()
+	if err != nil {
+		return err
+	}
+	user, ok := dbStruct.Users[userId]
+	if !ok {
+		return fmt.Errorf("no user with id: %d", userId)
+	}
+	user.IsChirpyRed = true
+	dbStruct.Users[userId] = user
+	return db.writeDB(dbStruct)
 }

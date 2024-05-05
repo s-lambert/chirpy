@@ -1,9 +1,13 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -78,6 +82,39 @@ func GetChirpsHandler(db *DB) http.HandlerFunc {
 			RespondWithError(w, 500, fmt.Sprintf("Failed to get chirps: %s", err.Error()))
 			return
 		}
+
+		authorIdStr := r.URL.Query().Get("author_id")
+		if authorIdStr != "" {
+			authorId, err := strconv.Atoi(authorIdStr)
+			if err != nil {
+				RespondWithError(w, 500, "Invalid chirp ID provided.")
+				return
+			}
+			authorChirps := make([]Chirp, 0)
+			for _, chirp := range chirps {
+				if authorId == chirp.AuthorId {
+					authorChirps = append(authorChirps, chirp)
+				}
+			}
+
+			sortQuery := r.URL.Query().Get("sort")
+			if sortQuery == "asc" {
+				sort.Slice(authorChirps, func(i, j int) bool { return authorChirps[i].Id < authorChirps[j].Id })
+			} else if sortQuery == "desc" {
+				sort.Slice(authorChirps, func(i, j int) bool { return authorChirps[i].Id > authorChirps[j].Id })
+			}
+
+			RespondWithJSON(w, 200, authorChirps)
+			return
+		}
+
+		sortQuery := r.URL.Query().Get("sort")
+		if sortQuery == "asc" {
+			sort.Slice(chirps, func(i, j int) bool { return chirps[i].Id < chirps[j].Id })
+		} else if sortQuery == "desc" {
+			sort.Slice(chirps, func(i, j int) bool { return chirps[i].Id > chirps[j].Id })
+		}
+
 		RespondWithJSON(w, 200, chirps)
 	}
 }
@@ -246,7 +283,7 @@ func createToken(jwtSecret string, userId int, expiresInSeconds int) (string, er
 	if expiresInSeconds != 0 {
 		expiryTime = time.Now().Add(time.Duration(expiresInSeconds) * time.Second)
 	} else {
-		expiryTime = time.Now().Add(time.Duration(24) * time.Hour)
+		expiryTime = time.Now().Add(time.Duration(1) * time.Hour)
 	}
 
 	claims := &jwt.RegisteredClaims{
@@ -260,6 +297,16 @@ func createToken(jwtSecret string, userId int, expiresInSeconds int) (string, er
 	return token.SignedString(mySigningKey)
 }
 
+func createRefreshToken() (string, time.Time) {
+	b := make([]byte, 32)
+	_, err := rand.Read(b)
+	if err != nil {
+		log.Fatal(err)
+	}
+	s := hex.EncodeToString(b)
+	return s, time.Now().Add(time.Duration(60) * time.Hour * 24)
+}
+
 func LoginUserHandler(db *DB, cfg *ApiConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type LoginRequest struct {
@@ -268,9 +315,11 @@ func LoginUserHandler(db *DB, cfg *ApiConfig) http.HandlerFunc {
 			ExpiresInSeconds int    `json:"expires_in_seconds"`
 		}
 		type LoginResponse struct {
-			Id    int    `json:"id"`
-			Email string `json:"email"`
-			Token string `json:"token"`
+			Id           int    `json:"id"`
+			Email        string `json:"email"`
+			IsChirpyRed  bool   `json:"is_chirpy_red"`
+			Token        string `json:"token"`
+			RefreshToken string `json:"refresh_token"`
 		}
 
 		decoder := json.NewDecoder(r.Body)
@@ -299,12 +348,94 @@ func LoginUserHandler(db *DB, cfg *ApiConfig) http.HandlerFunc {
 			return
 		}
 
+		rToken, exp := createRefreshToken()
+
+		db.SaveRefreshToken(user.Id, rToken, exp)
+
 		loggedInUserId = user.Id
 		loginResponse := LoginResponse{
-			Id:    user.Id,
-			Email: user.Email,
-			Token: token,
+			Id:           user.Id,
+			Email:        user.Email,
+			IsChirpyRed:  user.IsChirpyRed,
+			Token:        token,
+			RefreshToken: rToken,
 		}
 		RespondWithJSON(w, 200, loginResponse)
+	}
+}
+
+func RefreshTokenHandler(db *DB, cfg *ApiConfig) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+
+		userId, err := db.RefreshTokenUser(rToken)
+		if err != nil {
+			RespondWithError(w, 401, "Invalid/expired token")
+			return
+		}
+
+		token, err := createToken(cfg.JwtSecret, userId, 0)
+		if err != nil {
+			RespondWithError(w, 401, "Could not generate token")
+			return
+		}
+
+		type NewTokenResponse struct {
+			Token string `json:"token"`
+		}
+		RespondWithJSON(w, 200, NewTokenResponse{
+			Token: token,
+		})
+	}
+}
+
+func RevokeTokenHandler(db *DB, cfg *ApiConfig) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+
+		err := db.RevokeRefreshToken(rToken)
+		if err != nil {
+			RespondWithError(w, 401, "Invalid/expired token")
+			return
+		}
+
+		w.WriteHeader(200)
+	}
+}
+
+func PolkaWebhookHandler(db *DB, cfg *ApiConfig) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		type WebhookRequest struct {
+			Event string `json:"event"`
+			Data  struct {
+				UserId int `json:"user_id"`
+			} `json:"data"`
+		}
+
+		apiKey := strings.TrimPrefix(r.Header.Get("Authorization"), "ApiKey ")
+		if apiKey != cfg.PolkaKey {
+			RespondWithError(w, 401, "Invalid polka key")
+			return
+		}
+
+		decoder := json.NewDecoder(r.Body)
+		webhookReq := WebhookRequest{}
+		err := decoder.Decode(&webhookReq)
+		if err != nil {
+			RespondWithError(w, 500, fmt.Sprintf("Error marshalling JSON: %s", err))
+			return
+		}
+
+		if webhookReq.Event != "user.upgraded" {
+			w.WriteHeader(200)
+			return
+		}
+
+		err = db.SetChirpyRed(webhookReq.Data.UserId)
+		if err != nil {
+			RespondWithError(w, 500, err.Error())
+		}
+
+		w.WriteHeader(200)
 	}
 }
